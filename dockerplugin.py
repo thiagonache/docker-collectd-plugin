@@ -69,6 +69,10 @@ def str_to_bool(value):
     else:
         raise ValueError('Unable to cast value (%s) to boolean' % value)
 
+def str_to_long(value):
+    """Construct a long from a string. 0L will be returned for null values"""
+    return long() if not value else long(value)
+
 
 def emit(container, dimensions, point_type, value, t=None,
          type_instance=None):
@@ -224,6 +228,23 @@ def read_memory_stats(container, dimensions, stats, t):
         log.notice('No detailed memory stats available from container {0}.'
                    .format(_c(container)))
 
+def read_config_stats(container, dimensions, config_stats, t):
+    """Process container configuration values being emitted as metrics"""
+    log.info('Reading memory stats: {0}'.format(config_stats))
+
+    cpu_period = config_stats['cpu_period']
+    cpu_quota = config_stats['cpu_quota']
+    cpu_nano_cpus = config_stats['cpu_nano_cpus']
+    cpu_shares = config_stats['cpu_shares']
+
+    # Docker interprets 0 shares as 1024
+    # Docker will also default cpu shares to 0
+    # Changing 0 to 1024 will make downstream calculations easier
+    cpu_shares = 1024 if not cpu_shares else cpu_shares
+
+    values = [cpu_period, cpu_quota, cpu_nano_cpus, cpu_shares]
+    emit(container, dimensions, 'cpu.configuration', values, t=t)
+
 
 class DimensionsProvider:
     """Helper class for performing dimension extraction from a given container.
@@ -313,7 +334,7 @@ class ContainerStats(threading.Thread):
     second), and make the most recently read data available in a variable.
     """
 
-    def __init__(self, container, dimensions, client):
+    def __init__(self, container, dimensions, client, config_provider=None):
         threading.Thread.__init__(self)
         self.daemon = True
         self.stop = False
@@ -322,12 +343,19 @@ class ContainerStats(threading.Thread):
         self._client = client
         self._feed = None
         self._stats = None
+        self.config_stats = {}
 
         # Extract dimensions values
         self.dimensions = {}
         if dimensions:
             self.dimensions.update(dimensions.extract(self._client,
                                                       self._container))
+
+        self.config_stats = {}
+        if config_provider:
+            extracted = config_provider.extract(self._client, self._container)
+            self.config_stats.update(
+                {k: str_to_long(v) for k, v in extracted.iteritems()})
 
         # Automatically start stats reading thread
         self.start()
@@ -394,12 +422,22 @@ class DockerPlugin:
     METHODS = [read_network_stats, read_blkio_stats, read_cpu_stats,
                read_memory_stats]
 
+    # DimensionsProvider spec to extract container configuration values
+    # that will be emitted as metrics.
+    CONFIG_STATS_SPEC = {
+        'cpu_period' : 'inspect:HostConfig.CpuPeriod',
+        'cpu_quota' : 'inspect:HostConfig.CpuQuota',
+        'cpu_nano_cpus' : 'inspect:HostConfig.NanoCpus',
+        'cpu_shares' : 'inspect:HostConfig.CpuShares'
+    }
+
     def __init__(self, docker_url=None):
         self.docker_url = docker_url or DockerPlugin.DEFAULT_BASE_URL
         self.timeout = DockerPlugin.DEFAULT_DOCKER_TIMEOUT
         self.capture = False
         self.dimensions = None
         self.stats = {}
+        self.emit_config_stats = False
 
     def _container_name(self, names):
         """Extract the true container name from the list of container names
@@ -438,6 +476,8 @@ class DockerPlugin:
                     handle.verbose = str_to_bool(node.values[0])
                 elif node.key == 'Interval':
                     COLLECTION_INTERVAL = int(node.values[0])
+                elif node.key == 'ConfigurationStats':
+                    self.emit_config_stats = str_to_bool(node.value[0])
             except Exception as e:
                 log.error('Failed to load the configuration %s due to %s'
                           % (node.key, e))
@@ -450,6 +490,8 @@ class DockerPlugin:
             base_url=self.docker_url,
             version=DockerPlugin.MIN_DOCKER_API_VERSION)
         self.client.timeout = self.timeout
+
+        self.config_stats_provider = DimensionsProvider(self.CONFIG_STATS_SPEC)
 
         try:
             version = self.client.version()['ApiVersion']
@@ -510,7 +552,7 @@ class DockerPlugin:
                 if container['Id'] not in self.stats:
                     self.stats[container['Id']] = \
                         ContainerStats(container, self.dimensions,
-                                       self.client)
+                                       self.client, self.config_stats_provider)
 
                 cstats = self.stats[container['Id']]
                 stats = cstats.stats
@@ -522,6 +564,9 @@ class DockerPlugin:
                 # Process stats through each reader.
                 for method in self.METHODS:
                     method(container, cstats.dimensions, stats, read_at)
+
+                if self.emit_config_stats:
+                    read_config_stats(container, cstats.dimensions, cstats.config_stats, read_at)
             except Exception, e:
                 log.exception(('Unable to retrieve stats for container '
                                '{container}: {msg}')
