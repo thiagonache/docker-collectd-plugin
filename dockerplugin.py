@@ -390,6 +390,7 @@ class DockerPlugin:
 
     # The stats endpoint is only supported by API >= 1.17
     MIN_DOCKER_API_VERSION = '1.17'
+    MIN_DOCKER_API_STRICT_VERSION = StrictVersion(MIN_DOCKER_API_VERSION)
 
     # TODO: add support for 'networks' from API >= 1.20 to get by-iface stats.
     METHODS = [read_network_stats, read_blkio_stats, read_cpu_stats,
@@ -573,7 +574,7 @@ class DockerPlugin:
     # Method to compare docker version with min version required
     def check_version(self, version):
         if StrictVersion(version) < \
-                StrictVersion(DockerPlugin.MIN_DOCKER_API_VERSION):
+                DockerPlugin.MIN_DOCKER_API_STRICT_VERSION:
             log.error(('Docker daemon at {url} does not '
                        'support container statistics!')
                       .format(url=self.docker_url))
