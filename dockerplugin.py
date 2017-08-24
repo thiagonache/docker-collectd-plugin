@@ -537,7 +537,7 @@ class DockerPlugin:
         self.dimensions = DimensionsProvider(specs)
 
     def init_callback(self):
-        self.client = docker.Client(
+        self.client = docker.APIClient(
             base_url=self.docker_url,
             version=DockerPlugin.MIN_DOCKER_API_VERSION)
         self.client.timeout = self.timeout
